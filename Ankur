@@ -1,0 +1,38 @@
+Is your feature request related to a problem?
+The root cause is that only virtual record cursors were invoking Function.cursorClosed(), while Group By and related cursors did not. In QuestDB 8.3.3 this omission means functions like JsonExtractFunction never get notified when a cursor closes, so their resources (e.g. a 1 MB buffer) are never freed.
+To fix this, we must modify each cursor’s close() method to notify its functions before cleanup.
+GroupBy and Aggregation Cursors: In classes like GroupByRecordCursor, GroupByNotKeyedRecordCursor, AsyncGroupByRecordCursor, AsyncGroupByNotKeyedRecordCursor, and SampleByInterpolateRecordCursor, update close() to loop over the contained functions and call cursorClosed() on each before clearing them.
+
+Describe the solution you'd like.
+change:
+java
+// Before: missing function cleanup
+Misc.clearObjList(groupByFunctions);
+super.close();
+to:
+java
+// After: notify each function of cursor close
+for (int i = 0, n = groupByFunctions.size(); i < n; i++) {
+groupByFunctions.getQuick(i).cursorClosed();
+}
+Misc.clearObjList(groupByFunctions);
+super.close();
+This pattern (calling cursorClosed() on each function, then clearing and super.close()) must be applied to all GroupBy cursors.
+Sample-By and Skewed Symbol Cursors: Similarly, in any cursor that holds functions (e.g. AbstractNoRecordSampleByCursor), add a loop to call cursorClosed(). Also ensure that VirtualFunctionSkewedSymbolRecordCursor (and any override of close()) calls super.close() so that the base implementation (which now does the loop) runs.
+After these changes, each function’s cursorClosed() method will be invoked on cursor close. For example, JsonExtractFunction.cursorClosed() will now run after a GROUP BY query, freeing its 1 MB buffer
+. In summary, the solution is to add cursorClosed() calls in every cursor’s close() (as shown above) so that no cursor type skips the notification
+. With this patch, the memory leaks disappear: all stateful functions are properly cleaned up when their cursor closes, resolving the issue in QuestDB 8.3.3
+
+Describe alternatives you've considered.
+No response
+
+Full Name:
+Ankur maurya
+
+Affiliation:
+Independent contributor / MCA Student (Computer Applications) I’m currently studying programming and computer architecture, and I actively test and analyze performance issues in open-source databases like QuestDB.
+
+Additional context
+I'm reporting a real issue in QuestDB 8.3.3 where the Function.cursorClosed() method is not consistently invoked, particularly in GROUP BY and parallel aggregation cursors. This causes memory leaks when using stateful functions like json_extract(), which rely on cursorClosed() to free resources.
+You can find reproduction details in the test case ParallelGroupByFuzzTest#testParallelJsonKeyGroupBy() where JsonExtractFunction.cursorClosed() is not called.
+Although this may not be directly obvious from my GitHub profile, I am an active user and tester working with QuestDB internals and aim to help improve its robustness in real-world usage.
